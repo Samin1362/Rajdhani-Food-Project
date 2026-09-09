@@ -10,6 +10,7 @@
     "ext-json": "*",
     "ext-mbstring": "*",
     "ext-openssl": "*",
+    "ext-curl": "*",
     "psr/log": "^3.0"
   },
   "require-dev": {

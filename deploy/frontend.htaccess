@@ -1,0 +1,101 @@
+# Front-end .htaccess — Rajdhani Tea Platform
+#
+# Copy into the document root of BOTH front-ends: rajdhanifood.com (customer)
+# and admin.rajdhanifood.com (admin dashboard).
+#
+# Why this file exists and the API does not provide it.
+# §14.2 asks for a CSP "allowing Cloudinary, Google Fonts, Google Maps and Google
+# Identity". Those are things a *browser* loads while rendering a page, and the
+# API never renders a page — it returns JSON. So the API sends the restrictive
+# `default-src 'none'`, which is correct for a response that is never a
+# document, and the permissive policy belongs here, on the origins that actually
+# load third-party assets.
+#
+# Applying the API's CSP to the front-ends would block every script on the site.
+# Applying this one to the API would weaken it for no benefit.
+
+# ── SPA routing ──────────────────────────────────────────────────────────────
+# A React Router path such as /products/rajdhani-premium-tea is not a file on
+# disk. Without this the server 404s it, and a shared link opens an error page.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # Force HTTPS. The API refuses plaintext outright; a browser gets redirected,
+  # which is the right behaviour for something a person typed into a bar.
+  RewriteCond %{HTTPS} !=on
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  RewriteBase /
+  RewriteRule ^index\.html$ - [L]
+
+  # Anything that exists on disk is served as-is; everything else is the SPA.
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>
+
+# ── Security headers ─────────────────────────────────────────────────────────
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+  # The §14.2 policy. Every entry is here because something concrete needs it;
+  # delete an entry and the corresponding feature breaks in the browser console
+  # with no server-side error.
+  #
+  #   accounts.google.com / gsi          Google Identity Services — customer sign-in
+  #   res.cloudinary.com                 product, gallery and banner images
+  #   fonts.googleapis / fonts.gstatic   Google Fonts, stylesheet and font files
+  #   *.google.com maps / *.gstatic      the embedded contact map
+  #   api.rajdhanifood.com               the API itself, for fetch()
+  #
+  # 'unsafe-inline' on style-src is not laziness: styled-component and CSS
+  # custom property injection both write inline styles, and the theme colours
+  # from GET /public/layout arrive that way. Script-src has no such allowance.
+  Header always set Content-Security-Policy "\
+default-src 'self'; \
+base-uri 'self'; \
+object-src 'none'; \
+frame-ancestors 'self'; \
+form-action 'self'; \
+script-src 'self' https://accounts.google.com https://apis.google.com; \
+style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; \
+font-src 'self' https://fonts.gstatic.com data:; \
+img-src 'self' data: blob: https://res.cloudinary.com https://placehold.co https://*.googleusercontent.com https://*.gstatic.com https://*.google.com; \
+media-src 'self' https://res.cloudinary.com; \
+connect-src 'self' https://api.rajdhanifood.com https://accounts.google.com; \
+frame-src https://accounts.google.com https://www.google.com https://maps.google.com; \
+upgrade-insecure-requests"
+</IfModule>
+
+# ── Caching ──────────────────────────────────────────────────────────────────
+# Vite fingerprints its build output, so those files are immutable. index.html
+# is not fingerprinted and must never be cached, or a returning visitor keeps
+# loading the previous deployment's asset names.
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/css                  "access plus 1 year"
+  ExpiresByType application/javascript    "access plus 1 year"
+  ExpiresByType image/svg+xml             "access plus 1 year"
+  ExpiresByType font/woff2                "access plus 1 year"
+</IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.(?:css|js|woff2|svg|png|jpg|jpeg|webp)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+
+  <FilesMatch "index\.html$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>
+
+# ── Do not serve what is not the site ────────────────────────────────────────
+<FilesMatch "^\.|(?:composer\.(?:json|lock)|package(?:-lock)?\.json|\.env.*|.*\.md)$">
+  Require all denied
+</FilesMatch>
+
+Options -Indexes

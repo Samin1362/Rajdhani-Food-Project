@@ -99,9 +99,13 @@ Started 2026-09-07. The Node/Prisma implementation was deleted after salvaging i
 | | |
 |---|---|
 | **Toolchain** | PHP 8.3.33. MySQL **8.0.46** on port **3307**, own datadir, own socket, driven by `backend/api/bin/mysql8.sh`. |
-| **Schema (RTPP-9)** | 7 migrations + bookkeeping table, **generated from §8 of the doc**, in computed FK order. Applies to a virgin database: 36 tables, 43 FKs, 0 non-utf8mb4, 0 non-InnoDB, every FK indexed, Bangla round-trips, `CHECK (id = 1)` rejects a second `site_profile` row on INSERT *and* UPDATE. |
+| **Schema (RTPP-9)** | 7 migrations + bookkeeping table, **generated from §8 of the doc**, in computed FK order. Applies to a virgin database: 36 tables (37 after RTPP-15 added `rate_limits`), 43 FKs, 0 non-utf8mb4, 0 non-InnoDB, every FK indexed, Bangla round-trips, `CHECK (id = 1)` rejects a second `site_profile` row on INSERT *and* UPDATE. |
 | **Runner (RTPP-9)** | `bin/migrate.php` — forward-only, sha256 per applied file, refuses to run when an applied migration has been edited. Verified: virgin → apply → re-apply no-op → tamper refused → restore passes. |
 | **Seeders (RTPP-10)** | 12 seeders + `bin/seed.php`, one transaction, FK order. Virgin database → **690 rows across 24 tables**: 64 districts, 493 upazilas, 1 site profile, 8 categories, 3 products / 6 pack sizes, 5 banners, 10 SEO rows, 12 settings, 19 menu links. A second run writes **0 rows**, asserted in CI. Reference data is corrected on re-run; client-owned content is never overwritten — both proved by editing rows and re-seeding. |
+| **Security baseline (RTPP-15)** | Rate limiting on a **database counter**, not process memory — 100 req/15 min per IP globally, 5/hour per IP per public form, each form with its own budget. Proved live across 105 separate PHP processes: exactly 100 through, the 101st refused, `Retry-After` and `X-RateLimit-*` headers set. Health checks and preflights exempt. Plus a parameter-pollution guard, HTTPS refusal in production, and the front-end CSP delivered as `deploy/frontend.htaccess`. |
+| **Site profile (RTPP-14)** | `GET /public/layout` — one unauthenticated, header-free call returning site identity, logos, theme, contact, map, grouped menus, social links and newsletter visibility. `GET|PATCH /admin/site-profile`, Super-Admin-only, writing through an allowlist with per-field validation. Verified live: changing `primary_color` in the database changes the next response (§18.2), a non-Super-Admin PATCH is refused 403 by the API, and every optional field returns null rather than breaking. 28 tests. |
+| **Authorisation (RTPP-13)** | `RolePolicy` — the §7.3 matrix as data, 16 capabilities × 3 roles — plus `RequireRole` middleware with four ordered levels (`NONE < READ < OWN < WRITE`) and deny-by-default. **214 tests** cover it: 48 assert the matrix against a hand-transcribed second copy, 144 drive every capability × level × role through the real middleware chain with a real signed token. `GET /auth/admin/me` now returns the caller's matrix row so the dashboard's hidden navigation cannot disagree with the API. |
+| **Customer auth (RTPP-12)** | 6 endpoints under `/auth/customer/*`. Google ID tokens verified server-side against Google's JWKS — RS256 signature, `alg` allowlist, issuer, **audience**, expiry, `email_verified` — with a hand-written JWK→PEM converter proved byte-identical to OpenSSL's own output. Keys cached on disk from their `Cache-Control` TTL (186 ms → 0.1 ms), one forced refetch on a key rotation. 22 unit tests sign real RS256 tokens with a generated key pair, so forgery rejection is actually exercised. |
 | **Admin auth (RTPP-11)** | 11 endpoints under `/auth/admin/*`. HS256 JWT (hand-written verifier: rejects `alg:none`, tampering, wrong secret, wrong audience; `hash_equals` throughout), argon2id credentials, refresh rotation with family-wide reuse detection, `HttpOnly` cookie path-scoped to `/api/v1/auth`, login throttle per email **and** per IP. Verified live end to end and by 23 database-backed tests. |
 | **Salvaged data** | `backend/api/database/seed-data/bd-locations.json` (64 districts, 493 upazilas) and `.../site-content.json` (green brand only, reshaped to `site_profile`). Moved under `backend/api/` in RTPP-10 so the seeders ship with the deployable directory. |
 
@@ -118,16 +122,20 @@ MySQL 8. Renamed to `last_seq` in §8.2 — more accurate anyway, since it is a 
 number. Fixed locally; **Confluence §8 still carries the old line** and is synced at the
 end of Phase 1.
 
+**MySQL's `NOW()` was six hours ahead of the application's clock.** The app writes
+every `DATETIME(3)` as a UTC string built in PHP, but the MySQL session inherited the
+machine's Asia/Dhaka timezone. Nothing was broken — the application never mixed the two —
+but any future query comparing a stored timestamp against `NOW()` would have been silently
+wrong: a rate-limit window that never expires, a token that never times out. Found while
+writing a rate-limit test. The session is now pinned to `+00:00` on connect.
+
 Also worth recording: **§8's presentation order is not apply-order.** `site_profile` is
 documented first but must be created 32nd, because it references `media_assets`. The
 migrations are ordered by a dependency graph computed from the DDL, not by section order.
 
 ### Remaining in Phase 1
 
-RTPP-90 (hosting gate, **still unconfirmed**) · RTPP-12 (customer auth) ·
-RTPP-13 (roles) · RTPP-14 (`GET /public/layout`) ·
-RTPP-15 (rate limiting beyond admin login — CORS and security headers are in) ·
-RTPP-16 (OpenAPI, health).
+RTPP-90 (hosting gate, **still unconfirmed**) · RTPP-16 (OpenAPI, health).
 
 ---
 
@@ -225,10 +233,10 @@ document *first*, and the OpenAPI spec (RTPP-16) is the artefact they consume.
 | 1.3 | MySQL schema, migration runner, versioned migrations | RTPP-9 | 8 | ☑ **done** |
 | 1.4 | Seeders — site profile, districts/upazilas, super admin, demo content | RTPP-10 | 3 | ☑ **done** |
 | 1.5 | Admin auth — argon2id, JWT pair, refresh cookie, rotation | RTPP-11 | 5 | ☑ **done** |
-| 1.6 | Customer auth — Google OAuth | RTPP-12 | 5 | ☐ |
-| 1.7 | Authorization — the §7.3 role matrix, server-side | RTPP-13 | 3 | ☐ |
-| 1.8 | Site profile service and `GET /public/layout` | RTPP-14 | 3 | ☐ |
-| 1.9 | Security baseline — CORS, headers, rate limiting | RTPP-15 | 3 | ☐ |
+| 1.6 | Customer auth — Google OAuth | RTPP-12 | 5 | ☑ **done** |
+| 1.7 | Authorization — the §7.3 role matrix, server-side | RTPP-13 | 3 | ☑ **done** |
+| 1.8 | Site profile service and `GET /public/layout` | RTPP-14 | 3 | ☑ **done** |
+| 1.9 | Security baseline — CORS, headers, rate limiting | RTPP-15 | 3 | ☑ **done** |
 | 1.10 | OpenAPI specification and health endpoints | RTPP-16 | 3 | ☐ |
 | — | Client decisions (§19) — parallel, not a build task | RTPP-17 | — | ☐ blocked on you |
 
@@ -355,7 +363,7 @@ takes the site down; and cron is live for `TokenCleanup`, `MediaCleanup`, `LeadD
 
 - ◐ Phase 1 · ☐ Phase 2 · ☐ Phase 5 slice · ☐ Phase 6 slice
 
-**5 / 37 issues complete** — RTPP-7, RTPP-8, RTPP-9, RTPP-10, RTPP-11. **23 of Phase 1's 43 points.**
+**9 / 37 issues complete** — RTPP-7 through RTPP-15. **37 of Phase 1's 43 points.**
 
 Green on every gate: `composer check` passes (0 style issues, 0 PHPStan errors at
 level 8, 31 tests / 63 assertions), migrations apply to a virgin database and

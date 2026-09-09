@@ -69,6 +69,65 @@ final class Kernel
         });
     }
 
+    /**
+     * Compose routing and middleware into one callable.
+     *
+     * Separated from handle() so it can be driven from a test with a Request
+     * built by hand: handle() is `never`-returning by design — it writes a
+     * response and exits — which makes the composition itself untestable while
+     * it is buried inside. Authorisation is composition, so that matters.
+     *
+     * Routing happens *inside* the global middleware chain, not before it. A
+     * CORS preflight arrives as OPTIONS on a path that has no OPTIONS route
+     * registered, so routing first would 404 the request before Cors ever saw
+     * it — and the browser would report a CORS failure for a valid endpoint.
+     *
+     * @param array<int,class-string<Middleware>|Middleware> $globalMiddleware
+     *
+     * @return callable(Request):mixed
+     */
+    public static function pipeline(Router $router, array $globalMiddleware = []): callable
+    {
+        $dispatch = static function (Request $req) use ($router): mixed {
+            $matched = $router->match($req->method, $req->path);
+
+            foreach ($matched['params'] as $name => $value) {
+                $req->setAttribute($name, $value);
+            }
+
+            $runner = array_reduce(
+                array_reverse($matched['middleware']),
+                static function (callable $next, string|Middleware $middleware): callable {
+                    return static fn (Request $r): mixed => self::resolve($middleware)->handle($r, $next);
+                },
+                static fn (Request $r): mixed => ($matched['handler'])($r),
+            );
+
+            return $runner($req);
+        };
+
+        return array_reduce(
+            array_reverse($globalMiddleware),
+            static function (callable $next, string|Middleware $middleware): callable {
+                return static fn (Request $req): mixed => self::resolve($middleware)->handle($req, $next);
+            },
+            $dispatch,
+        );
+    }
+
+    /**
+     * Middleware is registered either by class name or, when it needs
+     * configuring, as an already-built instance — RequireRole is the latter,
+     * because the capability it guards is part of the route definition and the
+     * router has nowhere to put constructor arguments.
+     *
+     * @param class-string<Middleware>|Middleware $middleware
+     */
+    private static function resolve(string|Middleware $middleware): Middleware
+    {
+        return $middleware instanceof Middleware ? $middleware : new $middleware();
+    }
+
     public static function logger(): LoggerInterface
     {
         if (self::$logger === null) {
@@ -82,7 +141,7 @@ final class Kernel
     }
 
     /**
-     * @param array<int,class-string<Middleware>> $globalMiddleware
+     * @param array<int,class-string<Middleware>|Middleware> $globalMiddleware
      */
     public static function handle(Router $router, array $globalMiddleware = []): never
     {
@@ -93,48 +152,7 @@ final class Kernel
             $request = Request::capture();
             $request->setAttribute('request_id', $requestId);
 
-            // Routing happens *inside* the global middleware chain, not before
-            // it. A CORS preflight arrives as OPTIONS on a path that has no
-            // OPTIONS route registered, so routing first would 404 the request
-            // before Cors ever saw it — and the browser would report a CORS
-            // failure for a perfectly valid endpoint.
-            $dispatch = static function (Request $req) use ($router): mixed {
-                $matched = $router->match($req->method, $req->path);
-
-                foreach ($matched['params'] as $name => $value) {
-                    $req->setAttribute($name, $value);
-                }
-
-                $runner = array_reduce(
-                    array_reverse($matched['middleware']),
-                    static function (callable $next, string $middlewareClass): callable {
-                        return static function (Request $r) use ($middlewareClass, $next): mixed {
-                            /** @var Middleware $middleware */
-                            $middleware = new $middlewareClass();
-
-                            return $middleware->handle($r, $next);
-                        };
-                    },
-                    static fn (Request $r): mixed => ($matched['handler'])($r),
-                );
-
-                return $runner($req);
-            };
-
-            $runner = array_reduce(
-                array_reverse($globalMiddleware),
-                static function (callable $next, string $middlewareClass): callable {
-                    return static function (Request $req) use ($middlewareClass, $next): mixed {
-                        /** @var Middleware $middleware */
-                        $middleware = new $middlewareClass();
-
-                        return $middleware->handle($req, $next);
-                    };
-                },
-                $dispatch,
-            );
-
-            $result = $runner($request);
+            $result = (self::pipeline($router, $globalMiddleware))($request);
 
             // A handler that returned instead of calling ApiResponse still gets
             // wrapped, so there is exactly one envelope shape in the wild.

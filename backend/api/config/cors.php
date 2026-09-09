@@ -17,7 +17,15 @@ return [
 
     'allowed_headers' => ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
 
-    'exposed_headers' => ['X-Request-Id'],
+    // The rate-limit headers must be exposed or the browser hides them from
+    // JavaScript, and a client cannot slow down before it is refused.
+    'exposed_headers' => [
+        'X-Request-Id',
+        'X-RateLimit-Limit',
+        'X-RateLimit-Remaining',
+        'X-RateLimit-Reset',
+        'Retry-After',
+    ],
 
     'credentials' => true,
 

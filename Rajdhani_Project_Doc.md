@@ -658,6 +658,26 @@ CREATE TABLE login_attempts (
   KEY ix_login_attempts_email_time (email, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE rate_limits (
+  id           CHAR(26)     NOT NULL,
+  bucket_key   VARCHAR(191) NOT NULL,        -- 'global:203.0.113.7' | 'form:enquiry:203.0.113.7'
+  window_start DATETIME(3)  NOT NULL,
+  hits         INT UNSIGNED NOT NULL DEFAULT 0,
+  expires_at   DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_rate_limits_bucket (bucket_key),   -- one row per bucket; the lock target
+  KEY ix_rate_limits_expires (expires_at)          -- for the nightly prune
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+**Why `rate_limits` is a table.** §14.2 limits requests per IP, and §5.4 says
+Redis is optional and usually unavailable on shared hosting. PHP-FPM gives every
+request its own process, so an in-memory counter counts only the fraction that
+landed on one worker and the limit silently never fires — the failure mode is a
+guard that appears to work. The database is the only state every request shares.
+A fixed window (one row per bucket) rather than a sliding log (one row per
+request), because disk quota is the constraint that bites first on a shared
+account. Added in RTPP-15; recorded as deviation 7 in §19.
+
 CREATE TABLE audit_logs (
   id          CHAR(26)     NOT NULL,
   admin_id    CHAR(26)     NULL,
@@ -1218,7 +1238,7 @@ keys pointing at seeded rows.
 
 ### 8.10 Table Index
 
-**36 tables.** Grouped as the admin panel presents them:
+**37 tables.** Grouped as the admin panel presents them (`rate_limits` added in RTPP-15; §19 deviation 7):
 
 | Group | Tables |
 | --- | --- |
@@ -2055,6 +2075,8 @@ silently, so the document and the build stay reconcilable at acceptance.
 | 3 | §5.3, §8 | Database stated as **MySQL 8**; MariaDB 10.6+ is an acceptable substitute, since cPanel commonly ships MariaDB. The schema uses no MySQL-8-only syntax. To be confirmed against the account (§16.2 item 2). | 2026-09-06 |
 | 4 | §16 | Deployment target changed from **VPS running Ubuntu 24.04** to **shared cPanel hosting**. Consequences are enumerated in §16.6: no root, no Docker, no queue worker, probably no Redis, host-controlled PHP limits. | 2026-09-06 |
 | 5 | §2, §4, §6, §7, §8, §9, §11, §12, §13, §16, §17, §18 | **The second brand is removed; this is now a single-site platform.** The red/gold designs for Rajdhani Milk Added Tea were supplied in error and that brand was never in scope. Removed: the `brands` table (replaced by the `site_profile` singleton), `admin_brand_access`, `brand_id` and its foreign key on 23 tables, every `(brand_id, …)` composite key and index, the `X-Brand` header, `ResolveBrand`, `RequireBrandAccess`, the `BRAND_REQUIRED` and `BRAND_FORBIDDEN` error codes, the host-to-brand resolver, the admin brand switcher, the `rajdhanitea.com` domain, and the cross-brand isolation test suite. The schema drops from 37 tables to 36 and the timeline from 15 weeks to 13 (§17). Four constraints became *stronger*: globally unique SKUs, one newsletter row per email address, one step number per process group, and a real foreign key on `news_posts.author_id`. **§6.2 records what reversing this would cost.** | 2026-09-07 |
+| 6 | §8.2 | `reference_counters.last_value` renamed to **`last_seq`**. `LAST_VALUE` is a reserved window function in MySQL 8 and the column would not parse. Found by applying the DDL to a real database rather than by reading it. | 2026-09-07 |
+| 7 | §8.3 | **`rate_limits` table added.** §14.2 requires per-IP request limits and §5.4 rules out Redis on shared hosting, but §8 defined no storage for the counter. Under PHP-FPM an in-memory counter is per-process and the limit silently never fires (deviation 2), so the table is the only correct implementation. Added in RTPP-15. | 2026-09-09 |
 
 ---
 

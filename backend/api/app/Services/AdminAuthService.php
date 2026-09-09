@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Rajdhani\Services;
 
+use Rajdhani\Auth\Role;
+use Rajdhani\Auth\RolePolicy;
 use Rajdhani\Helpers\ApiError;
 use Rajdhani\Helpers\PasswordHelper;
 use Rajdhani\Http\Request;
@@ -381,6 +383,8 @@ final class AdminAuthService
      */
     private function publicProfile(array $row): array
     {
+        $role = Role::tryFromClaim($row['role'] ?? null);
+
         return [
             'id'            => (string) $row['id'],
             'name'          => (string) $row['name'],
@@ -391,6 +395,14 @@ final class AdminAuthService
             'is_active'     => (int) $row['is_active'] === 1,
             'last_login_at' => $row['last_login_at'] === null ? null : (string) $row['last_login_at'],
             'created_at'    => (string) $row['created_at'],
+
+            // The §7.3 matrix row for this admin, served from the same constant
+            // RequireRole enforces. §7.3 says the dashboard hides unavailable
+            // navigation but the API is the source of truth — sending the
+            // effective permissions is what stops a hidden button and a 403
+            // from ever disagreeing. It is a convenience for the UI, never a
+            // substitute for the server-side check.
+            'permissions' => $role === null ? [] : RolePolicy::permissionsFor($role),
         ];
     }
 }

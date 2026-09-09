@@ -258,6 +258,55 @@ final class AdminAuthTest extends DatabaseTestCase
         $this->auth->refresh($this->request(cookie: $session['refresh_token']));
     }
 
+    /**
+     * RTPP-13's third exit criterion: a deactivated admin's token stops working
+     * within one access-token lifetime.
+     *
+     * Two halves, because RequireAdmin does no database lookup (doc §7.2 accepts
+     * that trade explicitly — see the middleware):
+     *
+     *   1. The session cannot be *extended*. Refresh fails the moment the
+     *      account is deactivated, so no further access token is ever minted.
+     *   2. The access token already in the client's hands dies on its own
+     *      schedule, and that schedule is bounded by the configured lifetime.
+     *
+     * Together those bound the exposure at one access-token lifetime, which is
+     * what the criterion asks for.
+     */
+    public function testDeactivationEndsTheSessionWithinOneAccessTokenLifetime(): void
+    {
+        $email = $this->createAdmin(password: self::PASSWORD);
+        $session = $this->issueSession($email);
+
+        $this->db->exec('UPDATE admin_users SET is_active = 0 WHERE email = ' . $this->db->quote($email));
+
+        $refused = $this->captureApiError(
+            fn () => $this->auth->refresh($this->request(cookie: $session['refresh_token']))
+        );
+        self::assertSame(ErrorCode::UNAUTHENTICATED, $refused->errorCode(), 'The session must not be extendable');
+
+        // Nothing live is left to extend it with, either.
+        $live = (int) $this->db->query(
+            'SELECT COUNT(*) FROM refresh_tokens WHERE admin_id = (
+                 SELECT id FROM admin_users WHERE email = ' . $this->db->quote($email) . '
+             ) AND revoked_at IS NULL'
+        )?->fetchColumn();
+        self::assertSame(0, $live);
+
+        // And the outstanding access token expires within the documented window.
+        $lifetime = JwtHelper::ttl('admin_access', 1200);
+        self::assertLessThanOrEqual(1200, $lifetime, 'Doc §7.2 caps the admin access token at 20 minutes');
+
+        $expired = JwtHelper::encode(
+            JwtHelper::claims($this->adminId($email), 'admin', -($lifetime + 120), ['role' => 'SUPER_ADMIN']),
+            (string) config('auth.jwt.access_secret'),
+        );
+
+        $this->expectException(ApiError::class);
+        $this->expectExceptionCode(ErrorCode::TOKEN_EXPIRED->status());
+        JwtHelper::decode($expired, (string) config('auth.jwt.access_secret'), 'admin');
+    }
+
     // ---------------------------------------------------------------- invite
 
     public function testAcceptingAnInviteSetsAPasswordAndSignsTheInviteeIn(): void

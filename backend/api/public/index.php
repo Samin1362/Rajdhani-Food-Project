@@ -14,6 +14,8 @@ declare(strict_types=1);
 
 use Rajdhani\Kernel;
 use Rajdhani\Middleware\Cors;
+use Rajdhani\Middleware\GuardQueryParameters;
+use Rajdhani\Middleware\RateLimit;
 use Rajdhani\Middleware\SecurityHeaders;
 
 $basePath = dirname(__DIR__);
@@ -26,8 +28,22 @@ Kernel::boot($basePath);
 $router = require $basePath . '/routes/api.php';
 
 Kernel::handle($router, [
-    // Order matters. CORS answers preflight before anything else can reject the
-    // request, and security headers are set before a handler can emit a body.
+    // Order matters, and each position is a decision:
+    //
+    //   Cors                  answers the preflight before anything else can
+    //                         reject the request — a 429 or a 403 without CORS
+    //                         headers reaches the browser as an opaque network
+    //                         error rather than as the status it is.
+    //   SecurityHeaders       set before a handler can emit a body, and the
+    //                         place plaintext is refused in production.
+    //   GuardQueryParameters  rejects polluted query strings before any code
+    //                         reads $request->query() expecting a string.
+    //   RateLimit            counts last of the four, so a request refused by
+    //                         the guards above does not consume the caller's
+    //                         budget — but still before routing, so an unknown
+    //                         path cannot be hammered for free.
     Cors::class,
     SecurityHeaders::class,
+    GuardQueryParameters::class,
+    RateLimit::class,
 ]);
