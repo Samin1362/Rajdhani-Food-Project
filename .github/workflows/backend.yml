@@ -1,0 +1,126 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: backend/api
+
+jobs:
+  check:
+    name: Lint, analyse, test
+    runs-on: ubuntu-latest
+
+    services:
+      # MySQL 8, matching the production target rather than whatever the runner
+      # ships. The schema must be proven against the version the host runs
+      # (doc 19 deviation 3).
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: rajdhani_ci
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo, pdo_mysql, mbstring, json, openssl
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: backend/api/vendor
+          key: composer-${{ hashFiles('backend/api/composer.lock') }}
+          restore-keys: composer-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Code style
+        run: ./vendor/bin/php-cs-fixer fix --dry-run --diff
+
+      - name: Static analysis
+        run: ./vendor/bin/phpstan analyse --no-progress
+
+      - name: Unit tests
+        run: ./vendor/bin/phpunit --testsuite Unit
+
+      - name: Migrations apply to a virgin database
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        run: php bin/migrate.php up
+
+      - name: Migrations are idempotent
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        # A second run must change nothing. This is a Phase 1 exit criterion and
+        # the cheapest place to catch a migration that is not re-runnable.
+        run: |
+          OUT=$(php bin/migrate.php up)
+          echo "$OUT"
+          echo "$OUT" | grep -q 'nothing to do' || { echo "Second run was not a no-op"; exit 1; }
+
+      - name: Seeders fill a migrated database
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        run: php bin/seed.php
+
+      - name: Seeders are idempotent
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        # The RTPP-10 exit criterion: a second run inserts nothing and updates
+        # nothing. A seeder that writes on every run corrupts row counts slowly
+        # and is only ever noticed in production.
+        run: |
+          OUT=$(php bin/seed.php)
+          echo "$OUT"
+          echo "$OUT" | grep -q 'nothing to do' || { echo "Second seed run was not a no-op"; exit 1; }
+
+      - name: Feature tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        run: ./vendor/bin/phpunit --testsuite Feature
