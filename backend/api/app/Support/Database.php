@@ -50,6 +50,26 @@ final class Database
                 (string) config('database.password', ''),
                 $options,
             );
+            /*
+             * Pin the session to UTC.
+             *
+             * Every DATETIME(3) in this application is written as a UTC string
+             * built in PHP and read back the same way, so it is self-consistent
+             * — but MySQL's own NOW() follows the *server's* timezone, which is
+             * +06:00 on a machine set to Asia/Dhaka. Any query comparing a
+             * stored timestamp against NOW(), or writing one with it, would be
+             * six hours out, and the failure is silent: a rate-limit window
+             * that never expires, a token that never times out.
+             *
+             * Set here rather than through PDO's init-command option because
+             * that constant was renamed in PHP 8.4 and deprecated in 8.5, and
+             * this project supports 8.2 upward. One exec() works on all of them.
+             *
+             * '+00:00' rather than 'UTC': the named zones live in
+             * mysql.time_zone, which is routinely empty on shared hosting, and
+             * `SET time_zone = 'UTC'` then fails at connect.
+             */
+            self::$connection->exec("SET time_zone = '+00:00'");
         } catch (PDOException $e) {
             // The message carries credentials in some drivers; never let it
             // reach a response body.

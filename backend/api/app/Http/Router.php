@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Rajdhani\Http;
 
 use Rajdhani\Helpers\ApiError;
+use Rajdhani\Middleware\Middleware;
 
 /**
  * A small routing table with a per-route middleware pipeline.
@@ -20,10 +21,10 @@ use Rajdhani\Helpers\ApiError;
  */
 final class Router
 {
-    /** @var array<int,array{method:string,segments:string[],handler:callable,middleware:string[]}> */
+    /** @var array<int,array{method:string,segments:string[],handler:callable,middleware:list<class-string<Middleware>|Middleware>}> */
     private array $routes = [];
 
-    /** @var string[] */
+    /** @var list<class-string<Middleware>|Middleware> */
     private array $groupMiddleware = [];
 
     private string $groupPrefix = '';
@@ -54,8 +55,8 @@ final class Router
     }
 
     /**
-     * @param string[]           $middleware
-     * @param callable(self):void $register
+     * @param list<class-string<Middleware>|Middleware> $middleware
+     * @param callable(self):void                       $register
      */
     public function group(string $prefix, array $middleware, callable $register): void
     {
@@ -71,37 +72,37 @@ final class Router
         $this->groupMiddleware = $previousMiddleware;
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     public function get(string $path, callable $handler, array $middleware = []): void
     {
         $this->add('GET', $path, $handler, $middleware);
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     public function post(string $path, callable $handler, array $middleware = []): void
     {
         $this->add('POST', $path, $handler, $middleware);
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     public function patch(string $path, callable $handler, array $middleware = []): void
     {
         $this->add('PATCH', $path, $handler, $middleware);
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     public function put(string $path, callable $handler, array $middleware = []): void
     {
         $this->add('PUT', $path, $handler, $middleware);
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     public function delete(string $path, callable $handler, array $middleware = []): void
     {
         $this->add('DELETE', $path, $handler, $middleware);
     }
 
-    /** @param string[] $middleware */
+    /** @param list<class-string<Middleware>|Middleware> $middleware */
     private function add(string $method, string $path, callable $handler, array $middleware): void
     {
         $full = $this->groupPrefix . $path;
@@ -123,7 +124,7 @@ final class Router
     }
 
     /**
-     * @return array{handler:callable,middleware:string[],params:array<string,string>}
+     * @return array{handler:callable,middleware:list<class-string<Middleware>|Middleware>,params:array<string,string>}
      *
      * @throws ApiError 404 when no path matches, 405 when only the method differs
      */

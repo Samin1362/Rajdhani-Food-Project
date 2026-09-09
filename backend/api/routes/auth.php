@@ -17,16 +17,24 @@ declare(strict_types=1);
  */
 
 use Rajdhani\Controllers\Auth\AdminAuthController;
+use Rajdhani\Controllers\Auth\CustomerAuthController;
 use Rajdhani\Http\Router;
 use Rajdhani\Middleware\RequireAdmin;
+use Rajdhani\Middleware\RequireCustomer;
 
 /** @var Router $router */
 
 $router->group('/auth', [], static function (Router $r): void {
-    // RTPP-12 — customer (Google OAuth)
-    // $r->post('/customer/google',  Router::to(CustomerAuthController::class, 'google'));
-    // $r->post('/customer/refresh', Router::to(CustomerAuthController::class, 'refresh'));
-    // $r->post('/customer/logout',  Router::to(CustomerAuthController::class, 'logout'));
+    // RTPP-12 — customer (Google Identity Services). No password flow exists
+    // for customers, and no self-registration endpoint either: the account is
+    // created by the first successful Google sign-in.
+    $r->post('/customer/google', Router::to(CustomerAuthController::class, 'google'));
+    $r->post('/customer/refresh', Router::to(CustomerAuthController::class, 'refresh'));
+    $r->post('/customer/logout', Router::to(CustomerAuthController::class, 'logout'));
+
+    $r->get('/customer/me', Router::to(CustomerAuthController::class, 'me'), [RequireCustomer::class]);
+    $r->patch('/customer/me', Router::to(CustomerAuthController::class, 'updateMe'), [RequireCustomer::class]);
+    $r->delete('/customer/me', Router::to(CustomerAuthController::class, 'deleteMe'), [RequireCustomer::class]);
 
     // RTPP-11 — admin
     $r->post('/admin/login', Router::to(AdminAuthController::class, 'login'));

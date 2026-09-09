@@ -34,6 +34,10 @@ final class SettingsSeeder extends Seeder
         'ga4_measurement_id' => ['', 'analytics'],
         'facebook_pixel_id'  => ['', 'analytics'],
 
+        // Read by GET /public/layout so the footer knows whether to render
+        // the subscribe form (doc §9.3, "newsletter config").
+        'newsletter_enabled' => ['1', 'general'],
+
         'products_per_page'        => ['12', 'general'],
         'news_per_page'            => ['9', 'general'],
         'gallery_images_per_page'  => ['24', 'general'],

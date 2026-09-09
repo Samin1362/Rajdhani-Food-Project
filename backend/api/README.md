@@ -169,6 +169,173 @@ account, deactivated, never claimed — one message, one status, and
 `PasswordHelper::verify()` burns equivalent work against a decoy hash when there
 is no account, so the response time does not give it away either.
 
+## Rate limiting and transport security
+
+§14.2 asks for three per-IP limits. Two are here; the third — admin login, five
+failures per email then a lockout — lives in `AdminAuthService` because it counts
+*failures* rather than requests.
+
+| scope | limit | where |
+|---|---|---|
+| global | 100 / 15 min | `RateLimit`, global middleware |
+| public form | 5 / hour, per form | `ThrottleForm('enquiry')`, per route |
+
+**The counter is a database table, and that is the whole point.** PHP-FPM hands
+each request to whichever worker is free, and those workers share nothing — an
+in-memory counter sees a fraction of the traffic and the limit silently never
+fires. This is the piece the Node → PHP change hurt most (doc §19, deviation 2);
+`express-rate-limit` had one long-lived process to count in, and there is no such
+process here.
+
+`rate_limits` did not exist in §8 — the document required database-backed limits
+without defining the storage. Added as migration 008 and recorded as deviation 7.
+
+Two exemptions, both deliberate: **`OPTIONS`**, because a preflight is the
+browser asking permission and counting it would halve every cross-origin
+client's budget; and **the health endpoints**, because an uptime monitor polls
+them on a schedule and throttling it produces exactly the alert it exists to
+avoid.
+
+**The limiter fails open.** If the counter is unreachable the request proceeds. A
+guard rail that becomes a wall when it breaks is worse than the thing it guards
+against.
+
+Every response carries `X-RateLimit-Limit`, `-Remaining` and `-Reset`, and a 429
+adds `Retry-After`. All four are in the CORS exposed-headers list, or the browser
+hides them from JavaScript and a client cannot slow down before it is refused.
+
+### The other guards
+
+**`GuardQueryParameters`** rejects array-valued query parameters. PHP turns
+`?status[]=A&status[]=B` into an array where every caller expects a string —
+`(string) $array` emits "Array", `strlen()` throws — and none of it is visible to
+a reviewer reading `$request->query('status')`. No endpoint takes an array today,
+so rejecting them outright is correct now and will need relaxing per-route the
+day one genuinely wants one.
+
+**HTTPS is refused, not redirected**, in production. A 301 on a POST drops the
+body in some clients, and by the time the redirect is issued the credentials in
+that request have already crossed the network in clear text. The front-ends
+redirect in their own `.htaccess`, which is where a browser-facing redirect
+belongs.
+
+**The API's CSP is `default-src 'none'`** and that is not an oversight. §14.2's
+permissive policy — Cloudinary, Google Fonts, Maps, Identity — describes what a
+*browser* loads while rendering a page, and this API returns JSON. That policy
+ships as **`deploy/frontend.htaccess`**, ready to drop into both front-end
+document roots. Give it to the front-end developer.
+
+### One thing found while building this
+
+MySQL's `NOW()` was six hours ahead of the application's clock: the app writes
+UTC strings built in PHP, and the MySQL session inherited the machine's
+Asia/Dhaka timezone. Nothing was broken, because the application never mixed the
+two — but any query comparing a stored timestamp against `NOW()` would have been
+silently wrong. `Database::connection()` now pins the session to `+00:00`.
+
+---
+
+## The site profile
+
+`site_profile` is a singleton pinned by `CHECK (id = 1)` — the row that replaced
+the `brands` table when the project dropped to one site (doc §6). Everything the
+header, footer, theme and contact page need lives in it.
+
+`GET /public/layout` composes it with the navigation into the one call the
+front-end boots from: site identity, logos, theme colours, contact block, map,
+footer copy, grouped menus, social links, newsletter visibility. **No
+authentication, no header, no query string** — under v2.0 this is where
+`X-Brand` would have gone, and its absence is the observable part of the
+single-site cut.
+
+Three things that are deliberate:
+
+- **Nothing inserts.** The row is created once by the seeder; every later change
+  is an `UPDATE … WHERE id = 1`. The CHECK constraint is the backstop for a
+  mistake this code does not make, not the mechanism.
+- **The theme is data, never constants.** §18.2 requires the client to change
+  colours from the admin panel with no deployment, so the hex values travel in
+  this payload and the front-end applies them as CSS custom properties. A
+  hard-coded colour anywhere in the stack breaks that.
+- **Optional fields come back as `null`, not as zero.** Coordinates especially:
+  `(0, 0)` is a real place in the Gulf of Guinea, and a map centred there is
+  worse than one the front-end knows to hide.
+
+Images are returned as `{id, url, alt}` — the public site needs a URL to render,
+the admin panel needs the id to change it, and returning one would force the
+other consumer into a second request.
+
+`PATCH /admin/site-profile` writes through an allowlist with per-field
+validation (hex colours, email addresses, coordinate ranges), and is
+Super-Admin-only via `RequireRole::write(Capability::SETTINGS)`.
+
+---
+
+### Authorisation — the §7.3 matrix
+
+**Role is the only dimension** (doc §7.4). Under v2.0 access was the
+intersection of role and brand; with one site the intersection is just the role,
+so `RequireBrandAccess` and `admin_brand_access` are gone.
+
+Every admin route carries two middleware, in this order:
+
+```php
+[RequireAdmin::class, RequireRole::write(Capability::PRODUCTS)]
+```
+
+`RequireAdmin` establishes *who*; `RequireRole` decides *what*, against
+`RolePolicy` — the §7.3 table written out as data. A route registered with
+`RequireAdmin` alone is reachable by every admin of every role, which is correct
+for `/auth/admin/me` and almost nothing else.
+
+Four access levels, totally ordered: `NONE < READ < OWN < WRITE`. **A capability
+missing from a role's row is NONE** — deny is the default, so adding a
+capability without deciding its permissions locks everyone out rather than
+letting everyone in.
+
+`OWN` exists for exactly one cell: an Editor may delete media they uploaded, not
+media somebody else did. That is a row-level rule a middleware cannot decide, so
+`RequireRole::own()` admits the request and records `row_scope` (`all` or `own`)
+on it — **and the service is then obliged to filter**. Using `own()` anywhere
+else means inventing a rule the document does not contain.
+
+`GET /auth/admin/me` returns the caller's whole matrix row as `permissions`,
+served from the same constant the middleware enforces. §7.3 says the dashboard
+hides unavailable navigation but the API is the source of truth; sending the row
+is what stops a hidden button and a 403 from disagreeing. It is a convenience
+for the UI, never a substitute for the server-side check.
+
+### Customer sign-in
+
+Customers use Google only — no password, and no registration endpoint: the
+account is created by the first successful sign-in. The browser gets an ID token
+from Google Identity Services and posts it to `POST /auth/customer/google`.
+
+**That token is attacker-controlled input** until every check in
+`GoogleIdTokenVerifier` has passed. Each one maps to an attack:
+
+| Check | Without it |
+|---|---|
+| RS256 signature against Google's JWKS | anyone can write their own token |
+| `alg` from our list, not the token's | `alg: none`, and HS256 confusion |
+| `iss` is Google | a token from any other issuer |
+| **`aud` is our client id** | **a real Google token minted for someone else's app** |
+| `exp` / `iat` | replay of an old token |
+| `email_verified` | claiming an address you do not own |
+
+The `aud` check is the one that gets left out, and it is the one that would turn
+every other Google-enabled site's login into ours.
+
+**Account resolution order is load-bearing**: `google_id` first, then `email`,
+then create. Matching on email at all is only safe because an unverified address
+was already rejected; reversing the two would hand an account to whoever last
+used the address rather than to the Google account that owns it.
+
+Google's signing keys are cached on disk with the TTL from their own
+`Cache-Control` header (186 ms → 0.1 ms). A key id that is not in the cache
+triggers exactly one forced refetch before the token is rejected — an unknown
+`kid` is far more often a rotation than a forgery.
+
 **Local development caveat.** `SameSite=None` requires `Secure`, which requires
 HTTPS. Over `http://localhost` the cookie would be dropped, so `Cookie::secure()`
 falls back to `SameSite=Lax` when `APP_URL` is not https. Cross-origin refresh
@@ -223,7 +390,4 @@ cannot be unit-tested and cannot be reused from a cron job.
 
 ## Not yet done in Phase 1
 
-RTPP-90 (cPanel prerequisites — **unconfirmed**), RTPP-12 (customer auth),
-RTPP-13 (roles — `RequireRole` and the §7.3 matrix), RTPP-14
-(`/public/layout`), RTPP-15 (rate limiting beyond admin login — CORS and
-security headers are in), RTPP-16 (OpenAPI).
+RTPP-90 (cPanel prerequisites — **unconfirmed**), RTPP-16 (OpenAPI).

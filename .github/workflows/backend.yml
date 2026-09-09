@@ -114,6 +114,24 @@ jobs:
           echo "$OUT"
           echo "$OUT" | grep -q 'nothing to do' || { echo "Second seed run was not a no-op"; exit 1; }
 
+      - name: Schema matches the migration files
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: rajdhani_ci
+          DB_USERNAME: root
+          DB_PASSWORD: ''
+          JWT_ACCESS_SECRET: ci-access-secret-not-used-for-anything-real
+          JWT_REFRESH_SECRET: ci-refresh-secret-not-used-for-anything-real
+        # 37 tables from section 8 plus the migrations bookkeeping table. A
+        # count that drifts means a migration was added without the document
+        # being updated, or the other way round.
+        run: |
+          COUNT=$(mysql -h 127.0.0.1 -uroot rajdhani_ci -N -e \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='rajdhani_ci';")
+          echo "tables: $COUNT"
+          [ "$COUNT" = "38" ] || { echo "Expected 38 tables, found $COUNT"; exit 1; }
+
       - name: Feature tests
         env:
           DB_HOST: 127.0.0.1
