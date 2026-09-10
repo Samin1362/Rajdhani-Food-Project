@@ -67,6 +67,8 @@ curl http://127.0.0.1:8000/api/v1/health/db
 | `php bin/seed.php` | fill an empty database; safe to re-run |
 | `php bin/seed.php --list` | the seeders and the order they run in |
 | `php bin/seed.php --only=NewsSeeder` | run one seeder |
+| `php bin/openapi.php check` | confirm the spec matches the routes |
+| `php bin/openapi.php routes` | print the routing table |
 | `./vendor/bin/phpunit --testsuite Unit` | unit tests, no database needed |
 | `./vendor/bin/phpunit --testsuite Feature` | database-backed tests (skipped if no database) |
 
@@ -168,6 +170,33 @@ several admins to fail at once.
 account, deactivated, never claimed — one message, one status, and
 `PasswordHelper::verify()` burns equivalent work against a decoy hash when there
 is no account, so the response time does not give it away either.
+
+## API reference
+
+`docs/openapi.yaml` — OpenAPI 3.1, covering every implemented route with request
+and response schemas, both auth schemes, and the §9.1 envelope. Import it into
+Postman or Insomnia rather than reading it.
+
+Rendered at **`/api/v1/docs`**. Open outside production; in production it needs
+`?token=` matching `DOCS_TOKEN`, and returns **404** without one — a 401 would
+confirm the endpoint is there. **No `DOCS_TOKEN` means closed**, not open, so a
+deployment that never read this file does not publish its own attack surface.
+
+**It is maintained by hand and therefore drifts** — there is no swagger-jsdoc for
+PHP without an annotation library and a build step, and this project deploys by
+uploading files. So `php bin/openapi.php check` compares the spec against the
+live routing table **in both directions**: a route with no entry, or an entry
+with no route, fails. It runs in `composer check` and in CI, so drift breaks the
+build on the commit that caused it.
+
+That is not theatre — it caught the `/docs` routes themselves within a minute of
+my adding them.
+
+`symfony/yaml` parses the spec for that check and is a **dev dependency only**;
+production never loads it, and the docs endpoint serves the file as raw YAML
+rather than converting it.
+
+---
 
 ## Rate limiting and transport security
 
@@ -390,4 +419,5 @@ cannot be unit-tested and cannot be reused from a cron job.
 
 ## Not yet done in Phase 1
 
-RTPP-90 (cPanel prerequisites — **unconfirmed**), RTPP-16 (OpenAPI).
+RTPP-90 (cPanel prerequisites — **unconfirmed**) — the last Phase 1 item, and
+it needs the hosting account rather than code.

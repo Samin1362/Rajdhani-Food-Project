@@ -1,0 +1,1111 @@
+openapi: 3.1.0
+
+# Maintained by hand, not generated.
+#
+# There is no swagger-jsdoc equivalent under PHP without pulling in an
+# annotation library and a build step, and this project deploys by uploading
+# files to shared hosting (doc §16). A hand-written file is the honest trade —
+# and a hand-written file drifts, so `php bin/openapi.php check` compares this
+# document against the live routing table and CI fails the build on any
+# disagreement in either direction. Adding a route without documenting it, or
+# documenting one that does not exist, both break the build.
+
+info:
+  title: Rajdhani Tea Platform API
+  version: 1.0.0
+  summary: Backend REST API for rajdhanifood.com and its admin dashboard.
+  description: |
+    One site, two audiences.
+
+    **Authentication is two separate systems** sharing one backend (§7). Customers
+    sign in with Google only; admins with email and password, and are created by
+    invitation — there is no admin self-registration. The two are kept apart by
+    the `aud` claim inside the access token, not by which route is called, so an
+    admin token on a customer route is refused and the reverse is refused too.
+
+    **Tokens.** The short-lived access token goes in `Authorization: Bearer …`
+    and is held in memory by the client — never in `localStorage`. The refresh
+    token is **not in the response body**: it is set as an `HttpOnly` cookie
+    scoped to `/api/v1/auth`, so script cannot read it. Every browser call to a
+    refresh or logout endpoint must therefore send credentials:
+
+    ```js
+    fetch(url, { credentials: 'include' })
+    ```
+
+    **Refresh tokens are single-use.** Each refresh spends the presented token
+    and issues a new one in the same family. Presenting a spent token means two
+    parties hold it, so the entire family is revoked and both are forced back to
+    a full sign-in. That is breach detection working, not a bug.
+
+    **Every response uses one of two envelopes** (§9.1) — see the `Envelope`
+    schemas. Clients should switch on `error.code`, never on `error.message`.
+
+  contact:
+    name: Jamuna Tech
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://api.rajdhanifood.com/api/v1
+    description: Production
+  - url: http://127.0.0.1:8000/api/v1
+    description: Local development
+
+tags:
+  - name: Health
+    description: Liveness and dependency probes. No authentication, and exempt from rate limiting (§16.5).
+  - name: Docs
+    description: |
+      This reference. Open outside production; in production it needs
+      `?token=` matching `DOCS_TOKEN`, and returns 404 without it — an
+      unauthenticated caller should not learn the endpoint exists.
+  - name: Admin auth
+    description: Email and password, argon2id. Accounts are created by invitation (§7.2).
+  - name: Customer auth
+    description: Google Identity Services only. No password, no registration endpoint (§7.1).
+  - name: Public
+    description: Unauthenticated site content. No brand header — the API serves one site (§6).
+  - name: Admin
+    description: Dashboard endpoints, gated by the §7.3 role matrix.
+
+security: []
+
+paths:
+
+  # ── Health ────────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness
+      description: Answers whenever PHP is executing. Does not touch the database.
+      security: []
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status: { type: string, const: ok }
+                          service: { type: string, example: rajdhani-api  }
+                          time: { type: string, format: date-time }
+
+  /health/db:
+    get:
+      tags: [Health]
+      summary: Database reachability
+      description: |
+        **503, not 500,** when the database is unreachable. The service is up and its
+        dependency is not, and load balancers and uptime monitors treat those
+        differently.
+      security: []
+      responses:
+        '200':
+          description: The database answered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status: { type: string, const: ok }
+                          database: { type: string, const: reachable }
+                          time: { type: string, format: date-time }
+        '503':
+          description: The database is unreachable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  # ── Documentation ─────────────────────────────────────────────────────────
+
+  /docs:
+    get:
+      tags: [Docs]
+      summary: This reference, rendered
+      description: Returns HTML, not the section 9.1 envelope.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/DocsToken'
+      responses:
+        '200':
+          description: The rendered reference.
+          content:
+            text/html:
+              schema: { type: string }
+        '404':
+          description: |
+            In production without a valid `token`. Deliberately 404 rather than
+            401 — a 401 would confirm that a docs endpoint is here.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /docs/openapi.yaml:
+    get:
+      tags: [Docs]
+      summary: This specification, raw
+      description: |
+        Import straight into Postman, Insomnia or an OpenAPI client generator.
+        Served as YAML rather than JSON because every consumer reads YAML and
+        converting would mean parsing it at request time with a library that is
+        deliberately dev-only.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/DocsToken'
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema: { type: string }
+        '404':
+          description: In production without a valid `token`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  # ── Admin authentication ──────────────────────────────────────────────────
+
+  /auth/admin/login:
+    post:
+      tags: [Admin auth]
+      summary: Sign in
+      description: |
+        Rate limited: five failures per email per fifteen minutes, then a
+        thirty-minute lockout (§7.2). While locked, even the correct password
+        returns `429` — that is how a client tells "wait" from "wrong".
+
+        **Every failure returns the same message.** Wrong password, no such
+        account, deactivated, invitation never accepted: one answer, so the
+        endpoint cannot be used to discover which addresses are registered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Signed in. Sets the refresh cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/RefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminSession' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/admin/refresh:
+    post:
+      tags: [Admin auth]
+      summary: Rotate the session
+      description: |
+        Requires the refresh cookie, so the browser must send credentials.
+        The presented token is spent and a replacement issued in the same family.
+        A deactivated admin fails here — which is what bounds their access to one
+        access-token lifetime.
+      security: [{ adminRefreshCookie: [] }]
+      responses:
+        '200':
+          description: Rotated. Sets a new refresh cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/RefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminSession' }
+        '401':
+          description: |
+            No valid session. Also returned when a **spent** token is replayed, in
+            which case the whole token family has just been revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /auth/admin/logout:
+    post:
+      tags: [Admin auth]
+      summary: Sign out
+      description: |
+        Deliberately unauthenticated. A session whose access token has already
+        expired must still be able to end itself, or a tab left open overnight
+        cannot be logged out. Clears the cookie whether or not a token was found.
+      security: [{ adminRefreshCookie: [] }]
+      responses:
+        '200':
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          logged_out: { type: boolean, const: true }
+
+  /auth/admin/me:
+    get:
+      tags: [Admin auth]
+      summary: Current admin
+      description: |
+        Includes `permissions` — this admin's row of the §7.3 matrix, served from
+        the same table the middleware enforces. Use it to hide navigation the
+        caller cannot use. **It is a convenience for the UI and never a
+        substitute for the server-side check.**
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: The signed-in admin.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [Admin auth]
+      summary: Update own profile
+      description: |
+        Name, phone and avatar only. Role, email and active status are on the same
+        row and none of them may be changed by their owner — an admin who could
+        edit their own role would need no other escalation. Unknown fields are
+        ignored rather than rejected.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 255 }
+                phone: { type: [string, 'null'], maxLength: 32 }
+                avatar_id: { type: [string, 'null'], description: A media asset id (ULID).  }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/admin/change-password:
+    post:
+      tags: [Admin auth]
+      summary: Change own password
+      description: |
+        **Ends every session, including this one** (§7.2). A password change is the
+        response to a suspected compromise, so leaving other devices signed in
+        would defeat it. The client must sign in again — `reauthentication_required`
+        says so explicitly rather than letting the next call 401 silently.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { $ref: '#/components/schemas/NewPassword' }
+      responses:
+        '200':
+          description: Changed. Every session is now revoked.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          password_changed: { type: boolean, const: true }
+                          reauthentication_required: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422':
+          description: The current password was wrong, or the new one fails policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /auth/admin/forgot-password:
+    post:
+      tags: [Admin auth]
+      summary: Request a password reset
+      description: |
+        **Always succeeds**, whether or not the address belongs to an account.
+        Answering differently would make this an account-existence oracle that
+        needs no credentials at all. The reset link is emailed; the token is never
+        returned in the response.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Accepted. Says nothing about whether the account exists.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message: { type: string }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/admin/reset-password:
+    post:
+      tags: [Admin auth]
+      summary: Consume a reset token
+      description: Single use, and revokes every existing session for that admin.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string, minLength: 64, maxLength: 64 }
+                password: { $ref: '#/components/schemas/NewPassword' }
+      responses:
+        '200':
+          description: Password reset.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          password_reset: { type: boolean, const: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/admin/invite/{token}:
+    get:
+      tags: [Admin auth]
+      summary: Validate an invitation
+      description: |
+        Lets the set-password screen greet the invitee and check the link before
+        asking for a password it might then have to discard. Returns only name,
+        email and role.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/InviteToken'
+      responses:
+        '200':
+          description: The invitation is valid and unclaimed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          name: { type: string }
+                          email: { type: string, format: email }
+                          role: { $ref: '#/components/schemas/AdminRole' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /auth/admin/invite/{token}/accept:
+    post:
+      tags: [Admin auth]
+      summary: Accept an invitation
+      description: |
+        Sets the password and signs the invitee in immediately — they have just
+        proved possession of the emailed token and chosen a password, and a second
+        login step would add nothing.
+
+        Until this is called the account has **no password at all** and cannot be
+        logged into. That is how the seeded Super Admin starts (§7.2).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/InviteToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { $ref: '#/components/schemas/NewPassword' }
+      responses:
+        '200':
+          description: Accepted and signed in. Sets the refresh cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/RefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AdminSession' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # ── Customer authentication ───────────────────────────────────────────────
+
+  /auth/customer/google:
+    post:
+      tags: [Customer auth]
+      summary: Sign in with Google
+      description: |
+        Send the ID token Google Identity Services handed the browser. Either field
+        name works — `credential` is what GIS calls it, `id_token` is what most
+        examples call it.
+
+        The token is verified server-side against Google's published keys:
+        signature, algorithm, issuer, **audience** (it must have been minted for
+        *this* application), expiry, and `email_verified`. An account is created on
+        first sign-in; there is no separate registration endpoint.
+
+        `is_new` is true only on the sign-in that created the account, so the
+        front-end can show a welcome once.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credential: { type: string, description: The Google ID token (JWT).  }
+                id_token: { type: string, description: Accepted as an alias for `credential`.  }
+      responses:
+        '200':
+          description: Signed in. Sets the refresh cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/RefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          customer: { $ref: '#/components/schemas/CustomerProfile' }
+                          tokens: { $ref: '#/components/schemas/Tokens' }
+                          is_new: { type: boolean }
+        '401':
+          description: The Google token failed verification.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '403':
+          description: The account is suspended.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/customer/refresh:
+    post:
+      tags: [Customer auth]
+      summary: Rotate the session
+      security: [{ customerRefreshCookie: [] }]
+      responses:
+        '200':
+          description: Rotated. Sets a new refresh cookie.
+          headers:
+            Set-Cookie: { $ref: '#/components/headers/RefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          customer: { $ref: '#/components/schemas/CustomerProfile' }
+                          tokens: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/customer/logout:
+    post:
+      tags: [Customer auth]
+      summary: Sign out
+      security: [{ customerRefreshCookie: [] }]
+      responses:
+        '200':
+          description: Signed out.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          logged_out: { type: boolean, const: true }
+
+  /auth/customer/me:
+    get:
+      tags: [Customer auth]
+      summary: Current customer
+      security: [{ customerBearer: [] }]
+      responses:
+        '200':
+          description: The signed-in customer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CustomerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    patch:
+      tags: [Customer auth]
+      summary: Update own profile
+      description: |
+        Phone, city and company only — the fields that pre-fill an enquiry form.
+        Not name or avatar: Google owns those and overwrites them at the next
+        sign-in. Not email: it is the identity key. Send `""` to clear a field.
+      security: [{ customerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: { type: [string, 'null'], maxLength: 32 }
+                city: { type: [string, 'null'], maxLength: 128 }
+                company_name: { type: [string, 'null'], maxLength: 255 }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CustomerProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Customer auth]
+      summary: Delete the account
+      description: |
+        **Irreversible, and takes the customer's personal data with it** — wishlist
+        items, sessions, and their published product reviews. A deletion that left
+        public content attributed to the person would not be a deletion. Warn
+        clearly before calling this.
+      security: [{ customerBearer: [] }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          deleted: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  # ── Public ────────────────────────────────────────────────────────────────
+
+  /public/layout:
+    get:
+      tags: [Public]
+      summary: Everything the front-end boots from
+      description: |
+        Site identity, theme colours, logos, contact block, map, footer copy,
+        grouped navigation, social links and newsletter visibility — in one call,
+        because the header cannot be painted until all of it has arrived.
+
+        **No authentication, no header, no query string.** There is no `X-Brand`:
+        the API serves one site (§6).
+
+        The theme colours are data, not constants — the client changes them in the
+        admin panel and this endpoint reflects it on the very next request (§18.2).
+        Apply them as CSS custom properties rather than hard-coding any value.
+      security: []
+      responses:
+        '200':
+          description: The composed layout.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Layout' }
+
+  # ── Admin ─────────────────────────────────────────────────────────────────
+
+  /admin/site-profile:
+    get:
+      tags: [Admin]
+      summary: Read the site profile
+      description: |
+        The same payload as `/public/layout`, gated. Settings are a Super-Admin
+        capability in §7.3, so this read is narrower than the public one — what is
+        protected is the settings screen, not the content.
+      security: [{ adminBearer: [] }]
+      responses:
+        '200':
+          description: The site profile.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Layout' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      tags: [Admin]
+      summary: Update the site profile
+      description: |
+        Super Admin only. Send only the fields you are changing; `""` clears an
+        optional one. Colours must be hex (`#RGB`, `#RRGGBB` or `#RRGGBBAA`) —
+        an invalid colour reaches the browser as a CSS custom property and fails
+        *silently* there, so it is rejected here instead.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SiteProfileUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SiteProfile' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+components:
+
+  securitySchemes:
+    adminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Admin access token, 20 minutes. Its `aud` claim is `admin`, and a customer
+        token is refused on these routes even though both are signed with the same
+        key. Hold it in memory, never in `localStorage`.
+    customerBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Customer access token, 15 minutes. Its `aud` claim is `customer`.
+    adminRefreshCookie:
+      type: apiKey
+      in: cookie
+      name: rajdhani_admin_refresh
+      description: |
+        Set automatically on sign-in; `HttpOnly`, so script cannot read it. Send
+        `credentials: 'include'` or it will not travel cross-origin.
+    customerRefreshCookie:
+      type: apiKey
+      in: cookie
+      name: rajdhani_customer_refresh
+      description: As above, for the customer audience.
+
+  headers:
+    RefreshCookie:
+      description: |
+        `HttpOnly; Secure; SameSite=None`, scoped to `/api/v1/auth`. `SameSite=None`
+        requires `Secure`, which requires HTTPS — over plain `http://localhost` the
+        browser silently drops it and refresh cannot be tested at all.
+      schema: { type: string }
+
+  parameters:
+    DocsToken:
+      name: token
+      in: query
+      required: false
+      description: Required in production only; must match `DOCS_TOKEN`.
+      schema: { type: string }
+    InviteToken:
+      name: token
+      in: path
+      required: true
+      description: The single-use invitation token from the emailed link.
+      schema: { type: string, minLength: 64, maxLength: 64 }
+
+  responses:
+    Unauthenticated:
+      description: Missing, malformed, expired, or minted for the other audience.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EnvelopeError' }
+    Forbidden:
+      description: Authenticated, but this role may not do this (§7.3).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EnvelopeError' }
+    NotFound:
+      description: No such resource, or the token is invalid or already used.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EnvelopeError' }
+    ValidationError:
+      description: |
+        Input failed validation. `error.details` lists **every** failed rule at
+        once, so a form can mark all of its fields in one pass.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EnvelopeError' }
+    RateLimited:
+      description: Too many requests. `Retry-After` gives the wait in seconds.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+        X-RateLimit-Limit:
+          schema: { type: integer }
+        X-RateLimit-Remaining:
+          schema: { type: integer }
+        X-RateLimit-Reset:
+          schema: { type: integer, description: Unix timestamp when the window resets.  }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  schemas:
+
+    EnvelopeSuccess:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, const: true }
+        data: {}
+        meta: { type: object, description: 'Pagination and similar, when the endpoint returns a list.'}
+
+    EnvelopeError:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, const: false }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message:
+              type: string
+              description: For a human. **Never switch on this** — switch on `code`.
+            details:
+              type: array
+              description: Present on validation failures; one entry per failed rule.
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+
+    ErrorCode:
+      type: string
+      description: The closed set from §9.1. Adding a value is a contract change.
+      enum:
+        - VALIDATION_ERROR
+        - UNAUTHENTICATED
+        - TOKEN_EXPIRED
+        - FORBIDDEN
+        - NOT_FOUND
+        - CONFLICT
+        - RATE_LIMITED
+        - UPLOAD_FAILED
+        - INTERNAL_ERROR
+
+    Ulid:
+      type: string
+      minLength: 26
+      maxLength: 26
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      description: Crockford base32 ULID — sortable by creation time.
+
+    AdminRole:
+      type: string
+      enum: [SUPER_ADMIN, EDITOR, SALES]
+
+    NewPassword:
+      type: string
+      format: password
+      minLength: 10
+      description: |
+        At least 10 characters with an uppercase letter, a lowercase letter, a
+        digit and a symbol (§7.2). A failure returns every unmet rule at once.
+
+    Tokens:
+      type: object
+      description: |
+        **The refresh token is not here.** It travels only in the `HttpOnly`
+        cookie — returning it in the body would hand it back to the very script
+        the cookie protects it from.
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, description: Seconds until the access token expires.  }
+        refresh_expires_at: { type: integer, description: Unix timestamp the refresh cookie expires.  }
+
+    AdminProfile:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/AdminRole' }
+        phone: { type: [string, 'null'] }
+        avatar_id: { type: [string, 'null'] }
+        is_active: { type: boolean }
+        last_login_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        permissions: { $ref: '#/components/schemas/Permissions' }
+
+    Permissions:
+      type: object
+      description: |
+        This admin's row of the §7.3 matrix. `own` appears for one cell only — an
+        Editor may delete media they uploaded, not media somebody else did.
+      additionalProperties:
+        type: string
+        enum: [none, read, own, write]
+      example:
+        products: write
+        enquiries: read
+        settings: none
+        media: own
+
+    AdminSession:
+      type: object
+      properties:
+        admin: { $ref: '#/components/schemas/AdminProfile' }
+        tokens: { $ref: '#/components/schemas/Tokens' }
+
+    CustomerProfile:
+      type: object
+      description: '`google_id` is deliberately absent — the front-end has no use for it.'
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        email: { type: string, format: email }
+        avatar_url: { type: [string, 'null'] }
+        phone: { type: [string, 'null'] }
+        city: { type: [string, 'null'] }
+        company_name: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+
+    Image:
+      type: [object, 'null']
+      description: |
+        Null when unset. Carries both halves on purpose: the public site needs the
+        URL to render, the admin panel needs the id to change it.
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        url: { type: string, format: uri }
+        alt: { type: [string, 'null'] }
+
+    SiteProfile:
+      type: object
+      properties:
+        name: { type: string }
+        tagline: { type: [string, 'null'] }
+        logos:
+          type: object
+          properties:
+            light: { $ref: '#/components/schemas/Image' }
+            dark: { $ref: '#/components/schemas/Image' }
+            favicon: { $ref: '#/components/schemas/Image' }
+            og: { $ref: '#/components/schemas/Image' }
+        theme:
+          type: object
+          description: Apply as CSS custom properties. Never hard-code these values.
+          properties:
+            primary: { type: string, example: '#1B5E20'  }
+            secondary: { type: string, example: '#C9A227'  }
+            accent: { type: string, example: '#FFFFFF'  }
+        contact:
+          type: object
+          properties:
+            address_line: { type: [string, 'null'] }
+            city: { type: [string, 'null'] }
+            country: { type: [string, 'null'] }
+            phone_primary: { type: [string, 'null'] }
+            phone_secondary: { type: [string, 'null'] }
+            email_primary: { type: [string, 'null'] }
+            email_secondary: { type: [string, 'null'] }
+            website_url: { type: [string, 'null'] }
+            business_hours: { type: [string, 'null'] }
+        map:
+          type: object
+          description: |
+            Coordinates are `null` when unset, **not** `0`. (0, 0) is a real place
+            in the Gulf of Guinea; render no map rather than that one.
+          properties:
+            latitude: { type: [number, 'null'] }
+            longitude: { type: [number, 'null'] }
+            embed_url: { type: [string, 'null'] }
+        footer:
+          type: object
+          properties:
+            about: { type: [string, 'null'] }
+            copyright: { type: [string, 'null'] }
+        seo:
+          type: object
+          properties:
+            meta_title: { type: [string, 'null'] }
+            meta_description: { type: [string, 'null'] }
+
+    MenuLink:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        label: { type: string }
+        url: { type: string }
+        parent_id: { type: [string, 'null'] }
+        open_in_new_tab: { type: boolean }
+
+    Layout:
+      type: object
+      properties:
+        site: { $ref: '#/components/schemas/SiteProfile' }
+        menus:
+          type: object
+          description: |
+            Every location is always present, `[]` when empty — so indexing into
+            one is safe even if an editor deactivated every link in it.
+          properties:
+            header: { type: array, items: { $ref: '#/components/schemas/MenuLink' } }
+            footer_quick: { type: array, items: { $ref: '#/components/schemas/MenuLink' } }
+            footer_products: { type: array, items: { $ref: '#/components/schemas/MenuLink' } }
+            legal: { type: array, items: { $ref: '#/components/schemas/MenuLink' } }
+        social:
+          type: array
+          items:
+            type: object
+            properties:
+              platform: { type: string, example: facebook  }
+              url: { type: string, format: uri }
+              icon_name: { type: [string, 'null'] }
+        newsletter:
+          type: object
+          properties:
+            enabled: { type: boolean, description: Whether to render the footer sign-up form.  }
+
+    SiteProfileUpdate:
+      type: object
+      minProperties: 1
+      description: Send only what is changing. Unknown fields are ignored.
+      properties:
+        name: { type: string, maxLength: 255 }
+        tagline: { type: [string, 'null'], maxLength: 255 }
+        logo_light_id: { type: [string, 'null'] }
+        logo_dark_id: { type: [string, 'null'] }
+        favicon_id: { type: [string, 'null'] }
+        og_image_id: { type: [string, 'null'] }
+        primary_color: { $ref: '#/components/schemas/HexColour' }
+        secondary_color: { $ref: '#/components/schemas/HexColour' }
+        accent_color: { $ref: '#/components/schemas/HexColour' }
+        address_line: { type: [string, 'null'], maxLength: 255 }
+        city: { type: [string, 'null'], maxLength: 128 }
+        country: { type: [string, 'null'], maxLength: 128 }
+        phone_primary: { type: [string, 'null'], maxLength: 32 }
+        phone_secondary: { type: [string, 'null'], maxLength: 32 }
+        email_primary: { type: [string, 'null'], format: email }
+        email_secondary: { type: [string, 'null'], format: email }
+        website_url: { type: [string, 'null'], maxLength: 255 }
+        business_hours: { type: [string, 'null'], maxLength: 255 }
+        map_latitude: { type: [number, 'null'], minimum: -90, maximum: 90 }
+        map_longitude: { type: [number, 'null'], minimum: -180, maximum: 180 }
+        map_embed_url: { type: [string, 'null'] }
+        footer_about: { type: [string, 'null'] }
+        copyright_text: { type: [string, 'null'], maxLength: 255 }
+        meta_title: { type: [string, 'null'], maxLength: 255 }
+        meta_description: { type: [string, 'null'] }
+
+    HexColour:
+      type: string
+      pattern: '^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$'
+      example: '#1B5E20'

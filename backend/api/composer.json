@@ -14,9 +14,10 @@
     "psr/log": "^3.0"
   },
   "require-dev": {
-    "phpunit/phpunit": "^11.0",
+    "friendsofphp/php-cs-fixer": "^3.64",
     "phpstan/phpstan": "^2.0",
-    "friendsofphp/php-cs-fixer": "^3.64"
+    "phpunit/phpunit": "^11.0",
+    "symfony/yaml": "^8.1"
   },
   "autoload": {
     "psr-4": {
@@ -41,9 +42,11 @@
     "check": [
       "@lint",
       "@stan",
-      "@test"
+      "@test",
+      "@openapi"
     ],
-    "seed": "php bin/seed.php"
+    "seed": "php bin/seed.php",
+    "openapi": "php bin/openapi.php check"
   },
   "config": {
     "sort-packages": true,

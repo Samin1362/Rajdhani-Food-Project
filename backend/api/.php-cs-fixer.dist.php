@@ -2,7 +2,7 @@
 
 $finder = PhpCsFixer\Finder::create()
     ->in([__DIR__ . '/app', __DIR__ . '/tests', __DIR__ . '/database/seeders'])
-    ->append([__DIR__ . '/bin/migrate.php', __DIR__ . '/bin/seed.php']);
+    ->append([__DIR__ . '/bin/migrate.php', __DIR__ . '/bin/seed.php', __DIR__ . '/bin/openapi.php']);
 
 return (new PhpCsFixer\Config())
     ->setRiskyAllowed(true)

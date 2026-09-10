@@ -56,6 +56,12 @@ jobs:
       - name: Static analysis
         run: ./vendor/bin/phpstan analyse --no-progress
 
+      - name: OpenAPI matches the routes
+        # The specification is hand-maintained, so it drifts. Checked in both
+        # directions: a route with no entry, or an entry with no route, fails
+        # the build on the commit that caused it rather than months later.
+        run: php bin/openapi.php check
+
       - name: Unit tests
         run: ./vendor/bin/phpunit --testsuite Unit
 
