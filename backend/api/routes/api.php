@@ -37,6 +37,15 @@ $router->get('/health/db', static function (Request $r): array {
     return ['status' => 'ok', 'database' => 'reachable', 'time' => gmdate('c')];
 });
 
+/*
+ * The API reference (§5.3). Outside the three namespaces for the same reason
+ * health is: it is about the API rather than part of it. Protection lives in
+ * the controller, because a browser navigating here sends no Authorization
+ * header and a bearer-gated docs page is one nobody can open.
+ */
+$router->get('/docs', \Rajdhani\Http\Router::to(\Rajdhani\Controllers\DocsController::class, 'show'));
+$router->get('/docs/openapi.yaml', \Rajdhani\Http\Router::to(\Rajdhani\Controllers\DocsController::class, 'spec'));
+
 require __DIR__ . '/auth.php';
 require __DIR__ . '/public.php';
 require __DIR__ . '/admin.php';
