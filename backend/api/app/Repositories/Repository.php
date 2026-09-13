@@ -96,8 +96,38 @@ abstract class Repository
             throw new RuntimeException('Failed to prepare a statement.');
         }
 
-        $statement->execute($parameters);
+        $statement->execute($this->bindable($parameters));
 
         return $statement;
+    }
+
+    /**
+     * `PDOStatement::execute($array)` binds every value as a string unless told
+     * otherwise, and PHP's `(string) false` is `''` — not `'0'`. Bound against a
+     * `TINYINT` column under `PDO::ATTR_EMULATE_PREPARES = false`, that empty
+     * string is a real value MySQL receives and strict mode rejects outright:
+     * `Incorrect integer value: '' for column 'is_active'`. `true` is silently
+     * safer (`'1'` parses as 1) which is exactly what makes this easy to miss —
+     * a test that only ever sets a flag to true would never see it.
+     *
+     * Every column in this schema that stores a PHP boolean is a native
+     * `TINYINT(1)`, so converting to int here is correct everywhere, not a
+     * special case for one caller. Existing repositories route around the
+     * problem by writing `$bool ? 1 : 0` at the call site; this is the same
+     * fix, made once, so a future repository cannot reintroduce it.
+     *
+     * @param array<string,scalar|null> $parameters
+     *
+     * @return array<string,scalar|null>
+     */
+    private function bindable(array $parameters): array
+    {
+        foreach ($parameters as $key => $value) {
+            if (is_bool($value)) {
+                $parameters[$key] = (int) $value;
+            }
+        }
+
+        return $parameters;
     }
 }

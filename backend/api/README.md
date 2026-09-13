@@ -374,6 +374,131 @@ browser discards the cookie on `127.0.0.1`.
 
 ---
 
+## Categories (Phase 2, RTPP-18)
+
+`GET /public/categories` — active categories with a live product count, feeding
+the sticky filter bar and the header Products dropdown. No auth, no query
+string. `/admin/categories` has the full CRUD set plus `PATCH .../reorder`,
+gated on `Capability::PRODUCTS`.
+
+**The slug is globally unique** — there is no brand to scope it by (doc §6).
+Two layers enforce that on purpose: the service pre-checks for a clean `409`,
+and `uq_categories_slug` catches the race a pre-check cannot (two admins saving
+the same new category at once). Neither layer is redundant with the other.
+
+**An explicit slug and a derived one behave differently, deliberately.** Give
+`slug` yourself and a collision is a `409` — you chose a URL, not a suggestion.
+Omit it and one is derived from `name`, auto-suffixed (`-2`, `-3`, …) on
+collision, since nobody chose a specific value to be surprised about.
+
+**Never a hard `DELETE`.** `products.category_id` has a plain foreign key into
+this table with no cascade, so `DELETE /admin/categories/:id` sets
+`deleted_at` and stops there — a category's products are completely
+unaffected. Idempotent: deleting twice, or an id that never existed, still
+returns `200`.
+
+### Three real bugs this module found
+
+Not design notes — each failed a live request before it was caught, in order:
+
+1. **A duplicate PDO placeholder in `softDelete()`.** `PDO::ATTR_EMULATE_PREPARES`
+   is `false`, so `:now` cannot bind to two spots in one statement — every
+   delete returned `500 Invalid parameter number`. Fixed by naming the two
+   uses separately.
+2. **`is_active: false` failed the same way, one layer down.**
+   `PDOStatement::execute($array)` binds every value as a string, and PHP's
+   `(string) false` is `''`, not `'0'` — MySQL's strict mode then refuses that
+   empty string for a `TINYINT` column. `true` hides the bug (`'1'` parses
+   fine), which is exactly why a quick manual test would miss it. **Fixed in
+   the base `Repository` class**, not just here: every parameter array is now
+   passed through a cast that turns any PHP `bool` into `0`/`1` before
+   binding, so no future repository can reintroduce it. Existing repositories
+   already routed around this by writing `$bool ? 1 : 0` at the call site;
+   this is the same fix, made once.
+3. **An explicit duplicate slug on create was silently renamed**, not
+   rejected — the first version ran a given slug through the same
+   auto-suffix path as a derived one. Fixed by branching: derived slugs
+   auto-suffix, explicit ones get an exact match or a `409`.
+
+All three are regression tests in `tests/Feature/CategoryTest.php`, not just
+fixed — a test that only exercises the happy path would not have caught any of
+them.
+
+---
+
+## Products (Phase 2, RTPP-19)
+
+"The largest content module" in the plan — a product plus three child
+collections: pack sizes, highlights, images. `/admin/products` has the same
+CRUD-plus-reorder shape as categories; each child collection is *also* its own
+addressable sub-resource — `/admin/products/:id/pack-sizes` and siblings —
+with the identical shape again, for the dashboard's "add one row" interactions.
+
+**A create or update writes the product and every child in one transaction.**
+Send `pack_sizes`, `highlights` and `images` inline and the whole call
+succeeds or none of it is saved — this is how a tabbed form is expected to
+submit: the current contents of every tab, not an edit script. A child array
+is only touched when its key is present in the body at all; omitting
+`pack_sizes` leaves them untouched, sending `"pack_sizes": []` clears them —
+the two are deliberately not the same thing.
+
+**Rich text is sanitised server-side before storage** (`app/Helpers/RichText.php`,
+HTMLPurifier — a genuinely new dependency this module needed). `description`,
+`ingredients`, `nutrition_info`, `brewing_guide` and `packaging_info` go
+through a small fixed allowlist; `<script>`, `<style>`, `on*` attributes,
+`javascript:` URIs and inline images are stripped outright, not escaped.
+Verified against real payloads, not just configured and trusted: a `<script>`
+tag, an `onerror` handler, and a `javascript:` href were all tested and all
+neutralised before this was relied on. An empty or whitespace-only tab is
+stored and returned as `null`, never `""` — that is the difference between a
+front-end hiding a tab and rendering one that is blank.
+
+**`discount_percent` is never accepted from the client.** It is derived from
+`price` and `compare_price` on every write a pack size makes — a client-
+supplied percentage could disagree with the two prices next to it, which is a
+support ticket waiting to happen. A partial update touching only one of the
+two prices still recomputes correctly: the untouched side is read back from
+the stored row, not treated as absent.
+
+**`sku` is unique globally**, across every product, not scoped to one — same
+two-layer enforcement as a category's slug: a service pre-check for a clean
+`409`, `uq_pack_sizes_sku` for the race a pre-check cannot catch.
+
+**A product's children are never referenced by id from outside this module**
+(unlike categories, which `products.category_id` points at) — nothing FKs onto
+a pack size, a highlight or a product image, and `product_enquiries.pack_size_label`
+is a plain text snapshot, not a reference. That single fact is what makes
+delete-and-reinsert the *correct* semantics for a whole-array replace, not
+merely a convenient one.
+
+**Deleting a product never cascades to its children.** A soft delete sets
+`deleted_at` and stops there; the pack sizes, highlights and images survive
+completely untouched, because unpublishing a product for a day must not be the
+same operation as destroying its catalogue data.
+
+### Two real bugs this module found
+
+1. **A validation failure on a child silently left the product row committed
+   anyway.** `create()`'s transaction wrapper skipped `beginTransaction()`
+   whenever it detected an already-open transaction — reasonable-looking logic
+   copied from `RateLimitRepository`'s much simpler case, wrong here: a test
+   harness (or a future bulk-import job) legitimately opens its own outer
+   transaction, and skipping this method's *own* transaction inside one
+   silently discarded the atomicity the whole method exists to provide. Fixed
+   with `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` instead of a bare skip — correct
+   whether this runs at the top level or nested inside someone else's
+   transaction, with the same code path either way.
+2. **A partial pack-size update could silently zero out an existing
+   discount.** Caught in review, before it ran once: the first draft's "read
+   the untouched sibling price back" logic was a stub that always returned
+   `null`. Sending `{"price": 480}` against a pack size that already had a
+   `compare_price` would have dropped `discount_percent` to `null` instead of
+   recomputing it — reproduced and fixed before the file was ever executed.
+
+Both are regression tests in `tests/Feature/ProductTest.php`.
+
+---
+
 ## Layout
 
 Only `public/` is web-exposed. Everything else sits above it and is unreachable

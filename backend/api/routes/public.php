@@ -10,6 +10,7 @@ declare(strict_types=1);
  * (doc §6). Populated from RTPP-14 onward.
  */
 
+use Rajdhani\Controllers\Public\CategoryController;
 use Rajdhani\Controllers\Public\LayoutController;
 use Rajdhani\Http\Router;
 
@@ -20,4 +21,8 @@ $router->group('/public', [], static function (Router $r): void {
     // unauthenticated and header-free: it is the first call a cold page load
     // makes, before anyone has signed in.
     $r->get('/layout', Router::to(LayoutController::class, 'show'));
+
+    // RTPP-18 — feeds the sticky filter bar (§10.2) and the header Products
+    // dropdown (§10.5).
+    $r->get('/categories', Router::to(CategoryController::class, 'index'));
 });
