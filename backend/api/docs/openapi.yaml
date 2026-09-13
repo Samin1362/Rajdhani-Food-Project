@@ -712,7 +712,909 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/Layout' }
 
+  /public/categories:
+    get:
+      tags: [Public]
+      summary: Active categories, with product counts
+      description: |
+        Feeds the sticky filter bar (§10.2) and the header Products dropdown
+        (§10.5). No authentication, no query parameters.
+
+        A category with zero published products is still returned, with
+        `product_count: 0` — it is a real category waiting for its first
+        product, not a reason to hide it from the filter bar.
+      security: []
+      responses:
+        '200':
+          description: The active category list, in display order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/PublicCategory' }
+
   # ── Admin ─────────────────────────────────────────────────────────────────
+
+  /admin/categories:
+    get:
+      tags: [Admin]
+      summary: List categories
+      description: |
+        Paginated, newest sort order first. Visible to every role — Sales holds
+        only READ on `products` (§7.3), so the list is visible in the
+        dashboard even though the mutating routes below are not.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: search
+          in: query
+          required: false
+          description: Case-insensitive substring match on the category name.
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of categories.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Category' }
+                      meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    post:
+      tags: [Admin]
+      summary: Create a category
+      description: |
+        Only `name` is required. An explicit `slug` is honoured exactly — reject
+        with `409` if it collides, never silently renamed — because an admin who
+        typed a specific slug is choosing a URL, not making a suggestion. Omit
+        `slug` and one is derived from `name`, auto-suffixed (`-2`, `-3`, …) on
+        collision, since nobody chose a specific value to be surprised about.
+
+        `slug` is unique **globally** — there is no brand to scope it by (§6).
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryInput' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Category' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: The requested slug is already in use.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/categories/reorder:
+    patch:
+      tags: [Admin]
+      summary: Apply a new display order
+      description: |
+        Send every id in the order it should display; positions are assigned
+        `1..n` from that order. If any id does not match an existing category,
+        the ones that do are still applied — a stale id (a category deleted in
+        another tab) should not block reordering the rest — and the response
+        names what was missing.
+
+        Reflected in `GET /public/categories` on the very next request.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { $ref: '#/components/schemas/Ulid' }
+                  minItems: 1
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          reordered: { type: integer, description: How many ids were applied. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: A malformed id, a repeated id, or an id with no matching category.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/categories/{id}:
+    get:
+      tags: [Admin]
+      summary: Read one category
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+      responses:
+        '200':
+          description: The category.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Category' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update a category
+      description: |
+        Send only the fields that are changing. Renaming `slug` follows the
+        same rule as create: an exact match is attempted, `409` on collision,
+        never a silent rename — including against the category's own current
+        slug, which is never a collision with itself.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Category' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The requested slug is already in use by a different category.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Delete a category
+      description: |
+        Soft delete — the row is kept and `deleted_at` is set, never a hard
+        `DELETE`, because `products.category_id` has a plain foreign key into
+        this table with no cascade. A category's products are completely
+        unaffected by deleting it. Idempotent: deleting an already-deleted or
+        never-existing id still returns `200`.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+      responses:
+        '200':
+          description: Deleted (or already was).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          deleted: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/products:
+    get:
+      tags: [Admin]
+      summary: List products
+      description: Paginated; filter by `status`, `category_id`, or `search` (name substring).
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: search
+          in: query
+          required: false
+          schema: { type: string }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED] }
+        - name: category_id
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/Ulid' }
+      responses:
+        '200':
+          description: A page of products (summary shape — see `Product` for the full one returned by the other routes here).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ProductSummary' }
+                      meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    post:
+      tags: [Admin]
+      summary: Create a product
+      description: |
+        Only `name` and `category_id` are required. `pack_sizes`, `highlights`
+        and `images` may be included inline and are written in the **same
+        transaction** as the product row — the whole call succeeds or none of
+        it is saved. This is how the tabbed admin form is expected to submit:
+        the current contents of every tab, in one request.
+
+        Rich text fields (`description`, `ingredients`, `nutrition_info`,
+        `brewing_guide`, `packaging_info`) are sanitised server-side before
+        storage; anything not on a small fixed allowlist of tags is stripped,
+        not escaped. An empty tab is stored and returned as `null`, not `""`,
+        so the front-end can hide it rather than render a blank section.
+
+        `slug` follows the same rule as categories: given explicitly, it is
+        exact-or-`409`; omitted, it is derived from `name` and auto-suffixed
+        on collision.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses:
+        '200':
+          description: Created, with its children.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Product' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: The slug, or a pack size's SKU, is already in use.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/products/reorder:
+    patch:
+      tags: [Admin]
+      summary: Apply a new display order
+      description: Same contract as `/admin/categories/reorder` — see there for the missing-id behaviour.
+      security: [{ adminBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { $ref: '#/components/schemas/Ulid' }, minItems: 1 }
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          reordered: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: A malformed id, a repeated id, or an id with no matching product.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/products/{id}:
+    get:
+      tags: [Admin]
+      summary: Read one product, with its children
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: The product.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Product' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update a product
+      description: |
+        Send only what is changing. A child array (`pack_sizes`, `highlights` or
+        `images`) is only touched when its key is present in the body —
+        omitting `pack_sizes` entirely leaves them exactly as they were.
+        Sending `"pack_sizes": []` **does** clear them; the two are not the
+        same thing, on purpose.
+
+        `slug` is **not** re-derived when `name` changes. Renaming a published
+        product must not silently move its URL — only an explicit `slug` in
+        the body changes it.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductInput' }
+      responses:
+        '200':
+          description: Updated, with its children.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Product' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The requested slug, or a pack size's SKU, is already in use elsewhere.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Delete a product
+      description: |
+        Soft delete, idempotent — same reasoning as categories. **Never**
+        cascades to the child tables the way a real `DELETE` would: the pack
+        sizes, highlights and images are untouched, because unpublishing a
+        product for a day must not be the same operation as destroying its
+        catalogue data.
+      security: [{ adminBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Deleted (or already was).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          deleted: { type: boolean, const: true }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # Pack sizes, highlights and images share one shape — list, create, reorder,
+  # get one, update one, delete one — scoped to the product in the path. Each
+  # is documented once at that level of detail; the three differ only in the
+  # fields their own input schema carries.
+
+  /admin/products/{id}/pack-sizes:
+    get:
+      tags: [Admin]
+      summary: List a product's pack sizes
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      responses:
+        '200':
+          description: The pack sizes, in display order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/PackSize' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Admin]
+      summary: Add a pack size
+      description: |
+        `sku` is unique **globally**, across every product — not just this one.
+        `discount_percent` is never accepted from the client: it is derived
+        from `price` and `compare_price` on every write, because a
+        client-supplied percentage could disagree with the two prices next to
+        it. Setting `is_default: true` unsets it on every other pack size of
+        this product, so exactly one (or none) is ever the default.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PackSizeInput' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PackSize' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The SKU is already in use, or this product already has a pack size with this label.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/products/{id}/pack-sizes/reorder:
+    patch:
+      tags: [Admin]
+      summary: Reorder this product's pack sizes
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { $ref: '#/components/schemas/Ulid' }, minItems: 1 }
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { reordered: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: An id that does not belong to this product's pack sizes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/products/{id}/pack-sizes/{packSizeId}:
+    get:
+      tags: [Admin]
+      summary: Read one pack size
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/PackSizeId' }]
+      responses:
+        '200':
+          description: The pack size.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PackSize' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update a pack size
+      description: |
+        Send only what is changing. Updating only one of `price` /
+        `compare_price` still recomputes `discount_percent` correctly — the
+        untouched price is read back from the stored row, not treated as
+        absent.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/PackSizeId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PackSizeInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PackSize' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The SKU or label collides with another pack size.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Delete a pack size
+      description: A real `DELETE` — unlike the product and category modules, there is no other table that references a pack size row, so nothing needs to survive it.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/PackSizeId' }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { deleted: { type: boolean, const: true } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/products/{id}/highlights:
+    get:
+      tags: [Admin]
+      summary: List a product's highlights
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      responses:
+        '200':
+          description: The highlights, in display order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/Highlight' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Admin]
+      summary: Add a highlight
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HighlightInput' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Highlight' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /admin/products/{id}/highlights/reorder:
+    patch:
+      tags: [Admin]
+      summary: Reorder this product's highlights
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { $ref: '#/components/schemas/Ulid' }, minItems: 1 }
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { reordered: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: An id that does not belong to this product's highlights.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/products/{id}/highlights/{highlightId}:
+    get:
+      tags: [Admin]
+      summary: Read one highlight
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/HighlightId' }]
+      responses:
+        '200':
+          description: The highlight.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Highlight' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update a highlight
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/HighlightId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HighlightInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Highlight' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Delete a highlight
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/HighlightId' }]
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { deleted: { type: boolean, const: true } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/products/{id}/images:
+    get:
+      tags: [Admin]
+      summary: List a product's images
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      responses:
+        '200':
+          description: The images, in display order.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/ProductImage' } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Admin]
+      summary: Attach an image
+      description: |
+        `media_id` must already exist in the media library (RTPP-21) — this
+        endpoint registers a reference, it does not accept a file. Setting
+        `is_primary: true` unsets it on every other image of this product.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductImageInput' }
+      responses:
+        '200':
+          description: Attached.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ProductImage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: '`media_id` does not match an existing media asset, among other validation failures.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/products/{id}/images/reorder:
+    patch:
+      tags: [Admin]
+      summary: Reorder this product's images
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { $ref: '#/components/schemas/Ulid' }, minItems: 1 }
+      responses:
+        '200':
+          description: Reordered.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { reordered: { type: integer } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: An id that does not belong to this product's images.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvelopeError' }
+
+  /admin/products/{id}/images/{imageId}:
+    get:
+      tags: [Admin]
+      summary: Read one image
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/ImageId' }]
+      responses:
+        '200':
+          description: The image.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ProductImage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Admin]
+      summary: Update an image
+      description: Only `is_primary` and `sort_order` are meaningful to change after the fact; swap `media_id` by deleting and re-attaching instead.
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/ImageId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductImageInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ProductImage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Admin]
+      summary: Detach an image
+      description: Removes the reference on this product; does not delete the underlying media asset (RTPP-22 owns that, with its own cross-table reference check).
+      security: [{ adminBearer: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProductId' }, { $ref: '#/components/parameters/ImageId' }]
+      responses:
+        '200':
+          description: Detached.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeSuccess'
+                  - type: object
+                    properties:
+                      data: { type: object, properties: { deleted: { type: boolean, const: true } } }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /admin/site-profile:
     get:
@@ -815,6 +1717,42 @@ components:
       required: true
       description: The single-use invitation token from the emailed link.
       schema: { type: string, minLength: 64, maxLength: 64 }
+    CategoryId:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
+    Page:
+      name: page
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Capped server-side so an uncapped page size is never an option.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 12 }
+    ProductId:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
+    PackSizeId:
+      name: packSizeId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
+    HighlightId:
+      name: highlightId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
+    ImageId:
+      name: imageId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Ulid' }
 
   responses:
     Unauthenticated:
@@ -862,7 +1800,7 @@ components:
       properties:
         success: { type: boolean, const: true }
         data: {}
-        meta: { type: object, description: 'Pagination and similar, when the endpoint returns a list.'}
+        meta: { type: object, description: 'Pagination and similar, when the endpoint returns a list.' }
 
     EnvelopeError:
       type: object
@@ -986,6 +1924,210 @@ components:
         id: { $ref: '#/components/schemas/Ulid' }
         url: { type: string, format: uri }
         alt: { type: [string, 'null'] }
+
+    Category:
+      type: object
+      description: The admin shape — every field, including ones the public payload omits.
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        slug: { type: string, description: Globally unique — there is no brand to scope it by (§6). }
+        description: { type: [string, 'null'] }
+        icon_name: { type: [string, 'null'], description: Icon key for the filter bar. }
+        image_id: { type: [string, 'null'] }
+        sort_order: { type: integer }
+        is_active: { type: boolean }
+        meta_title: { type: [string, 'null'] }
+        meta_description: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CategoryInput:
+      type: object
+      description: |
+        On create, only `name` is required. On update, every field is optional —
+        send just what is changing.
+      properties:
+        name: { type: string, maxLength: 255 }
+        slug:
+          type: string
+          description: |
+            Optional. Given exactly, or rejected with `409` if taken — never
+            silently renamed. Omit to derive one from `name` instead, which
+            **is** auto-suffixed on collision (see the endpoint description).
+        description: { type: [string, 'null'] }
+        icon_name: { type: [string, 'null'], maxLength: 64 }
+        image_id: { type: [string, 'null'], description: A media asset id (ULID). }
+        sort_order: { type: integer }
+        is_active: { type: boolean }
+        meta_title: { type: [string, 'null'], maxLength: 255 }
+        meta_description: { type: [string, 'null'] }
+
+    PublicCategory:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: [string, 'null'] }
+        icon_name: { type: [string, 'null'] }
+        image: { $ref: '#/components/schemas/Image' }
+        product_count:
+          type: integer
+          description: Published, non-deleted products only. Zero is a normal value, not an omission.
+
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+
+    ProductSummary:
+      type: object
+      description: The shape returned by the list endpoint — enough to render a table row.
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        category_id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED] }
+        is_featured: { type: boolean }
+        sort_order: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    Product:
+      type: object
+      description: The full shape — every route except the list returns this, children included.
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        category_id: { $ref: '#/components/schemas/Ulid' }
+        name: { type: string }
+        slug: { type: string, description: Globally unique. }
+        short_description: { type: [string, 'null'], description: Card blurb. }
+        tagline: { type: [string, 'null'] }
+        description: { type: [string, 'null'], description: 'Sanitised HTML. Null means: hide this tab.' }
+        ingredients: { type: [string, 'null'], description: Sanitised HTML. }
+        nutrition_info: { type: [string, 'null'], description: Sanitised HTML. }
+        brewing_guide: { type: [string, 'null'], description: Sanitised HTML. }
+        packaging_info: { type: [string, 'null'], description: Sanitised HTML. }
+        key_features: { type: [array, 'null'], items: { type: string } }
+        badge_text: { type: [string, 'null'], example: BEST SELLER }
+        badge_color: { type: [string, 'null'] }
+        status: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED] }
+        is_featured: { type: boolean, description: Included in the home carousel. }
+        sort_order: { type: integer }
+        view_count: { type: integer, description: 'Owned by traffic, not writable here.'}
+        rating_average: { type: number, description: 'Owned by the review module (RTPP-27), not writable here.'}
+        rating_count: { type: integer, description: 'Owned by the review module (RTPP-27), not writable here.'}
+        meta_title: { type: [string, 'null'] }
+        meta_description: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        pack_sizes: { type: array, items: { $ref: '#/components/schemas/PackSize' } }
+        highlights: { type: array, items: { $ref: '#/components/schemas/Highlight' } }
+        images: { type: array, items: { $ref: '#/components/schemas/ProductImage' } }
+
+    ProductInput:
+      type: object
+      description: |
+        On create, `name` and `category_id` are required. On update, every
+        field is optional — send only what is changing. `pack_sizes`,
+        `highlights` and `images`, when present, **replace** the product's
+        entire current set for that collection in the same transaction — not
+        a diff, a replacement, matching a tabbed form's "current contents of
+        this tab" submission.
+      properties:
+        name: { type: string, maxLength: 255 }
+        category_id: { $ref: '#/components/schemas/Ulid' }
+        slug:
+          type: string
+          description: |
+            Optional. Given exactly, or `409` if taken. Omitted on create, one
+            is derived from `name`. Omitted on update, the existing slug is
+            left untouched even if `name` changes.
+        short_description: { type: [string, 'null'] }
+        tagline: { type: [string, 'null'], maxLength: 255 }
+        description: { type: [string, 'null'], description: 'Rich text HTML, sanitised before storage.' }
+        ingredients: { type: [string, 'null'] }
+        nutrition_info: { type: [string, 'null'] }
+        brewing_guide: { type: [string, 'null'] }
+        packaging_info: { type: [string, 'null'] }
+        key_features: { type: array, items: { type: string } }
+        badge_text: { type: [string, 'null'], maxLength: 64 }
+        badge_color: { $ref: '#/components/schemas/HexColour' }
+        status: { type: string, enum: [DRAFT, PUBLISHED, ARCHIVED], default: DRAFT }
+        is_featured: { type: boolean, default: false }
+        sort_order: { type: integer }
+        meta_title: { type: [string, 'null'], maxLength: 255 }
+        meta_description: { type: [string, 'null'] }
+        pack_sizes: { type: array, items: { $ref: '#/components/schemas/PackSizeInput' } }
+        highlights: { type: array, items: { $ref: '#/components/schemas/HighlightInput' } }
+        images: { type: array, items: { $ref: '#/components/schemas/ProductImageInput' } }
+
+    PackSize:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        label: { type: string, example: 500g }
+        sku: { type: string, description: Globally unique across every product. }
+        price: { type: number }
+        compare_price: { type: [number, 'null'], description: 'Struck-through original, if discounted.'}
+        discount_percent: { type: [integer, 'null'], description: Derived from price and compare_price — never client-supplied. }
+        price_includes_vat: { type: boolean }
+        is_default: { type: boolean, description: At most one pack size per product. }
+        is_available: { type: boolean }
+        sort_order: { type: integer }
+
+    PackSizeInput:
+      type: object
+      description: On create, `label`, `sku` and `price` are required. On update, send only what is changing.
+      properties:
+        label: { type: string, maxLength: 64 }
+        sku: { type: string, maxLength: 64 }
+        price: { type: number, minimum: 0 }
+        compare_price: { type: [number, 'null'], minimum: 0 }
+        price_includes_vat: { type: boolean, default: true }
+        is_default: { type: boolean, default: false }
+        is_available: { type: boolean, default: true }
+        sort_order: { type: integer }
+
+    Highlight:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        title: { type: string, example: 100% Natural }
+        subtitle: { type: [string, 'null'] }
+        icon_name: { type: [string, 'null'] }
+        sort_order: { type: integer }
+
+    HighlightInput:
+      type: object
+      description: On create, `title` is required. On update, send only what is changing.
+      properties:
+        title: { type: string, maxLength: 255 }
+        subtitle: { type: [string, 'null'], maxLength: 255 }
+        icon_name: { type: [string, 'null'], maxLength: 64 }
+        sort_order: { type: integer }
+
+    ProductImage:
+      type: object
+      properties:
+        id: { $ref: '#/components/schemas/Ulid' }
+        media_id: { $ref: '#/components/schemas/Ulid' }
+        url: { type: string, format: uri }
+        alt: { type: [string, 'null'] }
+        is_primary: { type: boolean, description: At most one image per product. }
+        sort_order: { type: integer }
+
+    ProductImageInput:
+      type: object
+      description: On create, `media_id` is required. On update, send only what is changing.
+      properties:
+        media_id: { $ref: '#/components/schemas/Ulid' }
+        is_primary: { type: boolean, default: false }
+        sort_order: { type: integer }
 
     SiteProfile:
       type: object
